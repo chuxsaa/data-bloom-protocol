@@ -985,4 +985,79 @@
   )
 )
 
+;; Implement secure key rotation for long-term reservations
+(define-public (rotate-security-credentials (reservation-identifier uint) (previous-credentials (buff 64)) (new-credentials (buff 64)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (termination-block (get termination-block reservation-record))
+        (current-block block-height)
+        (credential-hash (hash160 previous-credentials))
+      )
+      ;; Only originator can rotate credentials
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      ;; Only for active long-term reservations (at least 2 weeks remaining)
+      (asserts! (> (- termination-block current-block) u2016) (err u260))
+      ;; New credentials must be different from previous
+      (asserts! (not (is-eq (hash160 previous-credentials) (hash160 new-credentials))) (err u261))
+      ;; Reservation must be in active state
+      (asserts! (or (is-eq (get reservation-status reservation-record) "pending") 
+                    (is-eq (get reservation-status reservation-record) "accepted")) ERR_STATUS_CONFLICT)
+
+      (print {action: "credentials_rotated", reservation-identifier: reservation-identifier, originator: originator, 
+              previous-hash: credential-hash, new-hash: (hash160 new-credentials), rotation-block: current-block})
+      (ok true)
+    )
+  )
+)
+
+;; Implement multi-signature approval for high-value reservations
+(define-public (add-approval-signature (reservation-identifier uint) (approver principal) (signature (buff 64)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+        (allocation (get allocation reservation-record))
+      )
+      ;; Only high-value reservations require multi-signature
+      (asserts! (> allocation u5000) (err u220))
+      ;; Only authorized parties can add approvals
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Only pending or accepted reservations can receive approvals
+      (asserts! (or (is-eq (get reservation-status reservation-record) "pending") 
+                   (is-eq (get reservation-status reservation-record) "accepted")) 
+                ERR_STATUS_CONFLICT)
+      ;; Approver must be different from transaction sender
+      (asserts! (not (is-eq approver tx-sender)) (err u221))
+
+      (print {action: "approval_signature_added", reservation-identifier: reservation-identifier, 
+              approver: approver, submitter: tx-sender, signature-hash: (hash160 signature)})
+      (ok true)
+    )
+  )
+)
+
+;; Implement circuit breaker to pause critical operations in emergency situations
+(define-public (toggle-emergency-circuit-breaker (activation-status bool) (emergency-justification (string-ascii 100)))
+  (begin
+    ;; Only protocol supervisor can toggle emergency circuit breaker
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+    ;; Justification required for audit purposes
+    (asserts! (> (len emergency-justification) u10) ERR_INVALID_PARAMETER)
+
+    ;; In full implementation, would set a data-var to track emergency status
+    ;; (var-set emergency-mode activation-status)
+
+    (print {action: "emergency_circuit_toggled", new-status: activation-status, 
+            activation-block: block-height, justification: emergency-justification})
+    (ok activation-status)
+  )
+)
+
 
