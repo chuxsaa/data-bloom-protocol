@@ -414,3 +414,87 @@
   )
 )
 
+;; Create phased reservation
+(define-public (create-phased-reservation (beneficiary principal) (data-identifier uint) (allocation uint) (phases uint))
+  (let 
+    (
+      (new-id (+ (var-get latest-reservation-id) u1))
+      (termination-date (+ block-height RESERVATION_DURATION_BLOCKS))
+      (phase-allocation (/ allocation phases))
+    )
+    (asserts! (> allocation u0) ERR_INVALID_PARAMETER)
+    (asserts! (> phases u0) ERR_INVALID_PARAMETER)
+    (asserts! (<= phases u5) ERR_INVALID_PARAMETER) ;; Max 5 phases
+    (asserts! (valid-beneficiary? beneficiary) ERR_INVALID_ORIGINATOR)
+    (asserts! (is-eq (* phase-allocation phases) allocation) (err u121)) ;; Ensure even division
+    (match (stx-transfer? allocation tx-sender (as-contract tx-sender))
+      success
+        (begin
+          (var-set latest-reservation-id new-id)
+          (print {action: "phased_reservation_created", reservation-identifier: new-id, originator: tx-sender, beneficiary: beneficiary, 
+                  data-identifier: data-identifier, allocation: allocation, phases: phases, phase-allocation: phase-allocation})
+          (ok new-id)
+        )
+      error ERR_OPERATION_FAILED
+    )
+  )
+)
+
+;; Create delayed recovery mechanism
+(define-public (configure-delayed-recovery (reservation-identifier uint) (delay-period uint) (recovery-contact principal))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (> delay-period u72) ERR_INVALID_PARAMETER) ;; Minimum 72 blocks delay (~12 hours)
+    (asserts! (<= delay-period u1440) ERR_INVALID_PARAMETER) ;; Maximum 1440 blocks delay (~10 days)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (activation-block (+ block-height delay-period))
+      )
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get reservation-status reservation-record) "pending") ERR_STATUS_CONFLICT)
+      (asserts! (not (is-eq recovery-contact originator)) (err u180)) ;; Recovery contact must differ from originator
+      (asserts! (not (is-eq recovery-contact (get beneficiary reservation-record))) (err u181)) ;; Recovery contact must differ from beneficiary
+      (print {action: "delayed_recovery_configured", reservation-identifier: reservation-identifier, originator: originator, 
+              recovery-contact: recovery-contact, activation-block: activation-block})
+      (ok activation-block)
+    )
+  )
+)
+
+;; Process delayed recovery request
+(define-public (execute-delayed-recovery (reservation-identifier uint))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (allocation (get allocation reservation-record))
+        (status (get reservation-status reservation-record))
+        (delay-period u24) ;; 24 blocks delay (~4 hours)
+      )
+      ;; Only originator or supervisor can execute
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Only from recovery-pending state
+      (asserts! (is-eq status "recovery-pending") (err u301))
+      ;; Delay period must have elapsed
+      (asserts! (>= block-height (+ (get creation-block reservation-record) delay-period)) (err u302))
+
+      ;; Process recovery
+      (unwrap! (as-contract (stx-transfer? allocation tx-sender originator)) ERR_OPERATION_FAILED)
+
+      ;; Update reservation status
+      (map-set ReservationIndex
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-record { reservation-status: "recovered", allocation: u0 })
+      )
+
+      (print {action: "delayed_recovery_executed", reservation-identifier: reservation-identifier, 
+              originator: originator, allocation: allocation})
+      (ok true)
+    )
+  )
+)
+
