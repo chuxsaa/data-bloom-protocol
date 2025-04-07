@@ -156,3 +156,108 @@
     )
   )
 )
+
+;; Reclaim expired reservation allocations
+(define-public (reclaim-expired-reservation (reservation-identifier uint))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (allocation (get allocation reservation-record))
+        (expiry (get termination-block reservation-record))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get reservation-status reservation-record) "pending") (is-eq (get reservation-status reservation-record) "accepted")) ERR_STATUS_CONFLICT)
+      (asserts! (> block-height expiry) (err u108)) ;; Must be expired
+      (match (as-contract (stx-transfer? allocation tx-sender originator))
+        success
+          (begin
+            (map-set ReservationIndex
+              { reservation-identifier: reservation-identifier }
+              (merge reservation-record { reservation-status: "expired" })
+            )
+            (print {action: "expired_reservation_reclaimed", reservation-identifier: reservation-identifier, originator: originator, allocation: allocation})
+            (ok true)
+          )
+        error ERR_OPERATION_FAILED
+      )
+    )
+  )
+)
+
+;; Initiate reservation challenge
+(define-public (challenge-reservation (reservation-identifier uint) (justification (string-ascii 50)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get reservation-status reservation-record) "pending") (is-eq (get reservation-status reservation-record) "accepted")) ERR_STATUS_CONFLICT)
+      (asserts! (<= block-height (get termination-block reservation-record)) ERR_RESERVATION_TIMEOUT)
+      (map-set ReservationIndex
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-record { reservation-status: "challenged" })
+      )
+      (print {action: "reservation_challenged", reservation-identifier: reservation-identifier, challenger: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
+
+;; Add cryptographic verification
+(define-public (append-cryptographic-verification (reservation-identifier uint) (cryptographic-proof (buff 65)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get reservation-status reservation-record) "pending") (is-eq (get reservation-status reservation-record) "accepted")) ERR_STATUS_CONFLICT)
+      (print {action: "cryptographic_verification_complete", reservation-identifier: reservation-identifier, verifier: tx-sender, cryptographic-proof: cryptographic-proof})
+      (ok true)
+    )
+  )
+)
+
+;; Register alternate contact
+(define-public (register-alternate-contact (reservation-identifier uint) (alternate-contact principal))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+      )
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      (asserts! (not (is-eq alternate-contact tx-sender)) (err u111)) ;; Alternate contact must be different
+      (asserts! (is-eq (get reservation-status reservation-record) "pending") ERR_STATUS_CONFLICT)
+      (print {action: "alternate_registered", reservation-identifier: reservation-identifier, originator: originator, alternate: alternate-contact})
+      (ok true)
+    )
+  )
+)
+
+;; Schedule maintenance with delay
+(define-public (schedule-maintenance-procedure (procedure-type (string-ascii 20)) (procedure-params (list 10 uint)))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+    (asserts! (> (len procedure-params) u0) ERR_INVALID_PARAMETER)
+    (let
+      (
+        (execution-time (+ block-height u144)) ;; 24 hours delay
+      )
+      (print {action: "procedure_scheduled", procedure-type: procedure-type, procedure-params: procedure-params, execution-time: execution-time})
+      (ok execution-time)
+    )
+  )
+)
+
