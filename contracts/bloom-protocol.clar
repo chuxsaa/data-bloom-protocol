@@ -570,3 +570,76 @@
   )
 )
 
+;; Register cryptographic verification keys for authentication
+(define-public (register-verification-keys (reservation-identifier uint) (primary-key (buff 33)) (backup-key (buff 33)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (status (get reservation-status reservation-record))
+      )
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      (asserts! (is-eq status "pending") ERR_STATUS_CONFLICT)
+      (asserts! (not (is-eq primary-key backup-key)) (err u220)) ;; Keys must be different
+      (print {action: "verification_keys_registered", reservation-identifier: reservation-identifier, 
+              originator: originator, primary-key-hash: (hash160 primary-key), backup-key-hash: (hash160 backup-key)})
+      (ok true)
+    )
+  )
+)
+
+;; Establish temporary access control with expiration
+(define-public (grant-temporary-access (reservation-identifier uint) (temporary-accessor principal) (access-duration uint))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (> access-duration u0) ERR_INVALID_PARAMETER)
+    (asserts! (<= access-duration u144) ERR_INVALID_PARAMETER) ;; Max 24 hours (144 blocks)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+        (expiration-block (+ block-height access-duration))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      (asserts! (not (is-eq temporary-accessor originator)) (err u230)) ;; Accessor must differ from originator
+      (asserts! (not (is-eq temporary-accessor beneficiary)) (err u231)) ;; Accessor must differ from beneficiary
+      (print {action: "temporary_access_granted", reservation-identifier: reservation-identifier, grantor: tx-sender,
+              temporary-accessor: temporary-accessor, expiration-block: expiration-block})
+      (ok expiration-block)
+    )
+  )
+)
+
+;; Implement emergency freeze mechanism for suspicious activities
+(define-public (emergency-freeze-reservation (reservation-identifier uint) (security-reason (string-ascii 50)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (status (get reservation-status reservation-record))
+      )
+      ;; Can be triggered by originator or supervisor only
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Can't freeze already completed reservations
+      (asserts! (not (is-eq status "completed")) (err u240))
+      (asserts! (not (is-eq status "reverted")) (err u241))
+      (asserts! (not (is-eq status "expired")) (err u242))
+      (asserts! (not (is-eq status "frozen")) (err u243))
+
+      ;; Update status to frozen
+      (map-set ReservationIndex
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-record { reservation-status: "frozen" })
+      )
+      (print {action: "reservation_frozen", reservation-identifier: reservation-identifier, requestor: tx-sender, 
+              security-reason: security-reason, freeze-block: block-height})
+      (ok true)
+    )
+  )
+)
+
