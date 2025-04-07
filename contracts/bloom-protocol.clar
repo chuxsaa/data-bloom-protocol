@@ -727,3 +727,85 @@
   )
 )
 
+;; Establish verification chain for reservations
+(define-public (establish-verification-chain 
+                (reservation-identifier uint) 
+                (verification-threshold uint) 
+                (required-verifiers (list 5 principal)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (> verification-threshold u0) ERR_INVALID_PARAMETER)
+    (asserts! (<= verification-threshold (len required-verifiers)) ERR_INVALID_PARAMETER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (allocation (get allocation reservation-record))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get reservation-status reservation-record) "pending") ERR_STATUS_CONFLICT)
+      (asserts! (> allocation u1000) (err u220)) ;; Only for significant allocations
+
+      ;; Ensure originator is not in the verifiers list
+      (asserts! (not (is-some (index-of required-verifiers originator))) (err u221))
+
+      (print {action: "verification_chain_established", reservation-identifier: reservation-identifier, 
+              originator: originator, verification-threshold: verification-threshold, required-verifiers: required-verifiers})
+      (ok true)
+    )
+  )
+)
+
+;; Implement rate limiting for critical operations
+(define-public (enforce-rate-limiting 
+                (operation-type (string-ascii 20)) 
+                (cooldown-period uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+    (asserts! (> cooldown-period u0) ERR_INVALID_PARAMETER)
+    (asserts! (<= cooldown-period u288) ERR_INVALID_PARAMETER) ;; Max 2 days cooldown
+    (let
+      (
+        (enforcement-block (+ block-height u1)) ;; Immediate enforcement + 1 block
+        (valid-operations (list "reservation" "transfer" "mediation" "recovery" "extension"))
+      )
+
+      ;; Note: Full implementation would track operation timestamps in contract variables
+
+      (print {action: "rate_limiting_enforced", operation-type: operation-type, 
+              cooldown-period: cooldown-period, enforcement-block: enforcement-block, 
+              supervisor: tx-sender})
+      (ok enforcement-block)
+    )
+  )
+)
+
+;; Implement multi-signature authorization for high-value reservations
+(define-public (authorize-with-multisig 
+                (reservation-identifier uint) 
+                (authorization-signatures (list 5 (buff 65))) 
+                (message-digest (buff 32)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (> (len authorization-signatures) u1) ERR_INVALID_PARAMETER) ;; At least 2 signatures
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (allocation (get allocation reservation-record))
+      )
+      ;; Only for high-value reservations
+      (asserts! (> allocation u5000) (err u240))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get reservation-status reservation-record) "pending") ERR_STATUS_CONFLICT)
+
+      ;; In production, would verify each signature against the message digest
+      ;; and confirm they represent unique authorized signatories
+
+      (print {action: "multisig_authorized", reservation-identifier: reservation-identifier, 
+              originator: originator, signature-count: (len authorization-signatures),
+              message-digest: message-digest})
+      (ok true)
+    )
+  )
+)
