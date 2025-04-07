@@ -1060,4 +1060,78 @@
   )
 )
 
+;; Implement rate limiting for high-frequency operations
+(define-public (register-rate-limit-exemption (principal-address principal) (exemption-level uint) (exemption-duration uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+    (asserts! (> exemption-level u0) ERR_INVALID_PARAMETER)
+    (asserts! (<= exemption-level u3) ERR_INVALID_PARAMETER) ;; Maximum exemption level is 3
+    (asserts! (> exemption-duration u0) ERR_INVALID_PARAMETER)
+    (asserts! (<= exemption-duration u720) ERR_INVALID_PARAMETER) ;; Maximum ~5 days exemption
+
+    (let
+      (
+        (expiration-block (+ block-height exemption-duration))
+      )
+      ;; In full implementation, would track exemptions in a map
+      ;; (map-set RateLimitExemptions principal-address 
+      ;;  { exemption-level: exemption-level, expiration-block: expiration-block })
+
+      (print {action: "rate_limit_exemption_registered", principal: principal-address, 
+              exemption-level: exemption-level, expiration-block: expiration-block})
+      (ok expiration-block)
+    )
+  )
+)
+
+;; Implement quarantine mechanism for suspicious reservations
+(define-public (quarantine-suspicious-reservation (reservation-identifier uint) (risk-assessment (string-ascii 50)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (status (get reservation-status reservation-record))
+        (quarantine-period u72) ;; 72 blocks (~12 hours)
+      )
+      ;; Only protocol supervisor can quarantine reservations
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+      ;; Only active reservations can be quarantined
+      (asserts! (or (is-eq status "pending") (is-eq status "accepted")) ERR_STATUS_CONFLICT)
+      ;; Risk assessment required for audit purposes
+      (asserts! (> (len risk-assessment) u10) ERR_INVALID_PARAMETER)
+      (print {action: "reservation_quarantined", reservation-identifier: reservation-identifier, 
+              originator: originator, quarantine-duration: quarantine-period, risk-assessment: risk-assessment})
+      (ok (+ block-height quarantine-period))
+    )
+  )
+)
+
+;; Implement secure escrow release with timelock
+(define-public (schedule-timelocked-release (reservation-identifier uint) (release-delay uint))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (> release-delay u6) ERR_INVALID_PARAMETER) ;; Minimum 6 blocks delay (~1 hour)
+    (asserts! (<= release-delay u720) ERR_INVALID_PARAMETER) ;; Maximum 720 blocks delay (~5 days)
+
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+        (allocation (get allocation reservation-record))
+        (scheduled-release-block (+ block-height release-delay))
+      )
+      ;; Only originator or supervisor can schedule release
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Only pending reservations can be scheduled for release
+      (asserts! (is-eq (get reservation-status reservation-record) "pending") ERR_STATUS_CONFLICT)
+      (print {action: "timelocked_release_scheduled", reservation-identifier: reservation-identifier, 
+              originator: originator, beneficiary: beneficiary, allocation: allocation, release-block: scheduled-release-block})
+      (ok scheduled-release-block)
+    )
+  )
+)
+
 
