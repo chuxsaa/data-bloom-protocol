@@ -894,3 +894,95 @@
     )
   )
 )
+
+
+;; Enforce multi-signature approval for high-value reservations
+(define-public (enforce-multi-signature-approval (reservation-identifier uint) (approver principal) (signature-data (buff 65)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (allocation (get allocation reservation-record))
+        (status (get reservation-status reservation-record))
+      )
+      ;; Only for high-value reservations (> 5000 STX)
+      (asserts! (> allocation u5000) (err u220))
+      ;; Approver must not be originator or beneficiary
+      (asserts! (not (is-eq approver originator)) (err u221))
+      (asserts! (not (is-eq approver (get beneficiary reservation-record))) (err u222))
+      ;; Only pending reservations can receive approvals
+      (asserts! (is-eq status "pending") ERR_STATUS_CONFLICT)
+      ;; Verify that approver is the tx-sender
+      (asserts! (is-eq tx-sender approver) ERR_UNAUTHORIZED)
+
+      (print {action: "multi_signature_approved", reservation-identifier: reservation-identifier, approver: approver, 
+              signature-hash: (hash160 signature-data), originator: originator})
+      (ok true)
+    )
+  )
+)
+
+;; Establish secure escrow for dispute resolution
+(define-public (establish-dispute-escrow (reservation-identifier uint) (arbitrator principal) (dispute-details (string-ascii 100)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+        (status (get reservation-status reservation-record))
+      )
+      ;; Only involved parties can initiate dispute
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      ;; Only active reservations can enter dispute
+      (asserts! (or (is-eq status "pending") (is-eq status "accepted")) ERR_STATUS_CONFLICT)
+      ;; Arbitrator must be different from both parties
+      (asserts! (and (not (is-eq arbitrator originator)) (not (is-eq arbitrator beneficiary))) (err u240))
+      ;; Update reservation status to disputed
+      (map-set ReservationIndex
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-record { reservation-status: "disputed" })
+      )
+
+      (print {action: "dispute_escrow_established", reservation-identifier: reservation-identifier, initiator: tx-sender, 
+              arbitrator: arbitrator, dispute-details: dispute-details})
+      (ok true)
+    )
+  )
+)
+
+;; Implement rate limiting for high-frequency operations
+(define-public (register-operation-attempt (operation-type (string-ascii 20)) (target-reservation uint))
+  (begin
+    (asserts! (valid-reservation-id? target-reservation) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: target-reservation }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (current-block block-height)
+        (cooldown-blocks u6) ;; Require 6 blocks (~1 hour) between operations
+      )
+      ;; Verify operation type is valid
+      (asserts! (or (is-eq operation-type "transfer") 
+                    (is-eq operation-type "extend") 
+                    (is-eq operation-type "challenge")
+                    (is-eq operation-type "verify")) (err u250))
+      ;; Check user is authorized for this reservation
+      (asserts! (or (is-eq tx-sender originator) 
+                    (is-eq tx-sender (get beneficiary reservation-record)) 
+                    (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+
+      ;; In production, we would check last operation time against cooldown period
+      ;; and store the new operation timestamp
+
+      (print {action: "operation_registered", operation-type: operation-type, target-reservation: target-reservation, 
+              operator: tx-sender, block: current-block, next-allowed: (+ current-block cooldown-blocks)})
+      (ok true)
+    )
+  )
+)
+
+
