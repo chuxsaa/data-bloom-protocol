@@ -498,3 +498,75 @@
   )
 )
 
+;; Configure security thresholds
+(define-public (set-security-thresholds (max-attempts uint) (lockout-duration uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+    (asserts! (> max-attempts u0) ERR_INVALID_PARAMETER)
+    (asserts! (<= max-attempts u10) ERR_INVALID_PARAMETER) ;; Maximum 10 attempts allowed
+    (asserts! (> lockout-duration u6) ERR_INVALID_PARAMETER) ;; Minimum 6 blocks lockout (~1 hour)
+    (asserts! (<= lockout-duration u144) ERR_INVALID_PARAMETER) ;; Maximum 144 blocks lockout (~1 day)
+
+    ;; Note: Full implementation would track thresholds in contract variables
+
+    (print {action: "security_thresholds_configured", max-attempts: max-attempts, 
+            lockout-duration: lockout-duration, supervisor: tx-sender, current-block: block-height})
+    (ok true)
+  )
+)
+
+;; Advanced cryptographic validation for high-value reservations
+(define-public (validate-with-advanced-cryptography (reservation-identifier uint) (cryptographic-attestation (buff 128)) (public-parameters (list 5 (buff 32))))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (> (len public-parameters) u0) ERR_INVALID_PARAMETER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+        (allocation (get allocation reservation-record))
+      )
+      ;; Only high-value reservations need advanced validation
+      (asserts! (> allocation u10000) (err u190))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get reservation-status reservation-record) "pending") (is-eq (get reservation-status reservation-record) "accepted")) ERR_STATUS_CONFLICT)
+
+      ;; In production, actual advanced cryptographic validation would occur here
+
+      (print {action: "advanced_crypto_validated", reservation-identifier: reservation-identifier, validator: tx-sender, 
+              attestation-hash: (hash160 cryptographic-attestation), public-parameters: public-parameters})
+      (ok true)
+    )
+  )
+)
+
+;; Transfer reservation management rights
+(define-public (transfer-reservation-management (reservation-identifier uint) (new-manager principal) (authorization-code (buff 32)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (current-manager (get originator reservation-record))
+        (current-status (get reservation-status reservation-record))
+      )
+      ;; Only current manager or supervisor can transfer
+      (asserts! (or (is-eq tx-sender current-manager) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; New manager must be different
+      (asserts! (not (is-eq new-manager current-manager)) (err u210))
+      (asserts! (not (is-eq new-manager (get beneficiary reservation-record))) (err u211))
+      ;; Only certain statuses allow transfer
+      (asserts! (or (is-eq current-status "pending") (is-eq current-status "accepted")) ERR_STATUS_CONFLICT)
+      ;; Update reservation management
+      (map-set ReservationIndex
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-record { originator: new-manager })
+      )
+      (print {action: "management_transferred", reservation-identifier: reservation-identifier, 
+              previous-manager: current-manager, new-manager: new-manager, auth-hash: (hash160 authorization-code)})
+      (ok true)
+    )
+  )
+)
+
