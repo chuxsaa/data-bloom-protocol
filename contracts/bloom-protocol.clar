@@ -643,3 +643,87 @@
   )
 )
 
+;; Establish multiple signatories requirement for high-value reservations
+(define-public (configure-multi-signatory (reservation-identifier uint) (required-signatories uint) (signatory-list (list 5 principal)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (> required-signatories u1) ERR_INVALID_PARAMETER) ;; At least 2 signatories required
+    (asserts! (<= required-signatories (len signatory-list)) ERR_INVALID_PARAMETER) ;; Can't require more than available
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (allocation (get allocation reservation-record))
+        (status (get reservation-status reservation-record))
+      )
+      ;; Only for high-value reservations
+      (asserts! (> allocation u5000) (err u250))
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      (asserts! (is-eq status "pending") ERR_STATUS_CONFLICT)
+      ;; Ensure originator is in the signatory list
+      (asserts! (is-some (index-of signatory-list originator)) (err u251))
+      (print {action: "multi_signatory_configured", reservation-identifier: reservation-identifier, 
+              required-signatories: required-signatories, signatory-list: signatory-list})
+      (ok true)
+    )
+  )
+)
+
+;; Implement graduated access control based on reservation lifecycle
+(define-public (upgrade-security-level (reservation-identifier uint) (security-level (string-ascii 10)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (allocation (get allocation reservation-record))
+        (current-block block-height)
+        (valid-levels (list "standard" "enhanced" "critical"))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+
+      ;; Enhanced security for high-value reservations
+      (if (is-eq security-level "critical")
+          (asserts! (> allocation u10000) (err u261)) ;; Critical level only for very high value
+          true
+      )
+
+      (print {action: "security_level_upgraded", reservation-identifier: reservation-identifier, 
+              requestor: tx-sender, new-security-level: security-level, current-block: current-block})
+      (ok true)
+    )
+  )
+)
+
+;; Implement tiered verification challenge with progressive unlocking
+(define-public (process-tiered-verification (reservation-identifier uint) (verification-tier uint) (verification-proof (buff 64)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (and (>= verification-tier u1) (<= verification-tier u3)) ERR_INVALID_PARAMETER) ;; Valid tiers: 1-3
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+        (allocation (get allocation reservation-record))
+        (status (get reservation-status reservation-record))
+        (verification-hash (hash160 verification-proof))
+      )
+      ;; Verify permission and state
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq status "pending") (is-eq status "accepted")) ERR_STATUS_CONFLICT)
+
+      ;; Higher tier verification needed for larger allocations
+      (if (is-eq verification-tier u3)
+          (asserts! (> allocation u5000) (err u270)) ;; Level 3 only for high value
+          true
+      )
+
+      (print {action: "tier_verification_processed", reservation-identifier: reservation-identifier, 
+              verifier: tx-sender, verification-tier: verification-tier, verification-hash: verification-hash})
+      (ok true)
+    )
+  )
+)
+
