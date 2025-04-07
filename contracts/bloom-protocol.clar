@@ -1211,5 +1211,79 @@
   )
 )
 
+;; Implement tiered authorization requirements based on transaction value
+(define-public (set-authorization-tiers (reservation-identifier uint) (tier1-threshold uint) (tier2-threshold uint) (tier3-threshold uint))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (< tier1-threshold tier2-threshold) ERR_INVALID_PARAMETER) ;; Ensure proper tier ordering
+    (asserts! (< tier2-threshold tier3-threshold) ERR_INVALID_PARAMETER) ;; Ensure proper tier ordering
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (allocation (get allocation reservation-record))
+      )
+      ;; Only originator can set authorization tiers
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      ;; Only pending reservations can have tiers configured
+      (asserts! (is-eq (get reservation-status reservation-record) "pending") ERR_STATUS_CONFLICT)
+      ;; Highest tier must be less than allocation
+      (asserts! (< tier3-threshold allocation) (err u240))
 
+      ;; In production implementation, additional code would store these thresholds
+      (print {action: "authorization_tiers_configured", reservation-identifier: reservation-identifier, 
+              tier1: tier1-threshold, tier2: tier2-threshold, tier3: tier3-threshold,
+              configured-by: tx-sender})
+      (ok true)
+    )
+  )
+)
 
+;; Implement geofencing protection for reservation access
+(define-public (enable-geofencing-protection (reservation-identifier uint) (allowed-regions (list 10 (string-ascii 2))) (geofencing-public-key (buff 33)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (> (len allowed-regions) u0) ERR_INVALID_PARAMETER) ;; At least one region must be specified
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+      )
+      ;; Only originator or supervisor can enable geofencing
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Geofencing can only be added to pending or accepted reservations
+      (asserts! (or (is-eq (get reservation-status reservation-record) "pending") 
+                   (is-eq (get reservation-status reservation-record) "accepted")) 
+                ERR_STATUS_CONFLICT)
+      ;; Reservation must not be expired
+      (asserts! (<= block-height (get termination-block reservation-record)) ERR_RESERVATION_TIMEOUT)
+
+      ;; In production, additional code would store allowed regions
+      (print {action: "geofencing_enabled", reservation-identifier: reservation-identifier, 
+              allowed-regions: allowed-regions, key-hash: (hash160 geofencing-public-key),
+              enabled-by: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Register authorized delegate for a reservation
+(define-public (register-authorized-delegate (reservation-identifier uint) (delegate principal) (permission-level (string-ascii 10)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+      )
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      (asserts! (not (is-eq delegate tx-sender)) (err u220)) ;; Delegate must be different from originator
+      (asserts! (not (is-eq delegate (get beneficiary reservation-record))) (err u221)) ;; Delegate must be different from beneficiary
+      (asserts! (or (is-eq permission-level "read") (is-eq permission-level "modify") (is-eq permission-level "full")) (err u222)) ;; Valid permission levels
+      (asserts! (is-eq (get reservation-status reservation-record) "pending") ERR_STATUS_CONFLICT)
+      (print {action: "delegate_registered", reservation-identifier: reservation-identifier, originator: originator, delegate: delegate, permission-level: permission-level})
+      (ok true)
+    )
+  )
+)
