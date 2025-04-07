@@ -261,3 +261,81 @@
   )
 )
 
+;; Resolve challenge through mediation
+(define-public (mediate-challenge (reservation-identifier uint) (originator-percentage uint))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+    (asserts! (<= originator-percentage u100) ERR_INVALID_PARAMETER) ;; Percentage must be 0-100
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+        (allocation (get allocation reservation-record))
+        (originator-allocation (/ (* allocation originator-percentage) u100))
+        (beneficiary-allocation (- allocation originator-allocation))
+      )
+      (asserts! (is-eq (get reservation-status reservation-record) "challenged") (err u112)) ;; Must be challenged
+      (asserts! (<= block-height (get termination-block reservation-record)) ERR_RESERVATION_TIMEOUT)
+
+      ;; Distribute originator's portion
+      (unwrap! (as-contract (stx-transfer? originator-allocation tx-sender originator)) ERR_OPERATION_FAILED)
+
+      ;; Distribute beneficiary's portion
+      (unwrap! (as-contract (stx-transfer? beneficiary-allocation tx-sender beneficiary)) ERR_OPERATION_FAILED)
+
+      (map-set ReservationIndex
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-record { reservation-status: "mediated" })
+      )
+      (print {action: "challenge_mediated", reservation-identifier: reservation-identifier, originator: originator, beneficiary: beneficiary, 
+              originator-allocation: originator-allocation, beneficiary-allocation: beneficiary-allocation, originator-percentage: originator-percentage})
+      (ok true)
+    )
+  )
+)
+
+;; Add secondary verification for high-value reservations
+(define-public (add-secondary-verification (reservation-identifier uint) (verifier principal))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (allocation (get allocation reservation-record))
+      )
+      ;; Only for high-value reservations (> 1000 STX)
+      (asserts! (> allocation u1000) (err u120))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get reservation-status reservation-record) "pending") ERR_STATUS_CONFLICT)
+      (print {action: "verification_added", reservation-identifier: reservation-identifier, verifier: verifier, requestor: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Suspend problematic reservation
+(define-public (suspend-problematic-reservation (reservation-identifier uint) (justification (string-ascii 100)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get reservation-status reservation-record) "pending") 
+                   (is-eq (get reservation-status reservation-record) "accepted")) 
+                ERR_STATUS_CONFLICT)
+      (map-set ReservationIndex
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-record { reservation-status: "suspended" })
+      )
+      (print {action: "reservation_suspended", reservation-identifier: reservation-identifier, reporter: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
