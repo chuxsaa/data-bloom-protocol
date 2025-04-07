@@ -261,3 +261,156 @@
   )
 )
 
+;; Resolve challenge through mediation
+(define-public (mediate-challenge (reservation-identifier uint) (originator-percentage uint))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+    (asserts! (<= originator-percentage u100) ERR_INVALID_PARAMETER) ;; Percentage must be 0-100
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+        (allocation (get allocation reservation-record))
+        (originator-allocation (/ (* allocation originator-percentage) u100))
+        (beneficiary-allocation (- allocation originator-allocation))
+      )
+      (asserts! (is-eq (get reservation-status reservation-record) "challenged") (err u112)) ;; Must be challenged
+      (asserts! (<= block-height (get termination-block reservation-record)) ERR_RESERVATION_TIMEOUT)
+
+      ;; Distribute originator's portion
+      (unwrap! (as-contract (stx-transfer? originator-allocation tx-sender originator)) ERR_OPERATION_FAILED)
+
+      ;; Distribute beneficiary's portion
+      (unwrap! (as-contract (stx-transfer? beneficiary-allocation tx-sender beneficiary)) ERR_OPERATION_FAILED)
+
+      (map-set ReservationIndex
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-record { reservation-status: "mediated" })
+      )
+      (print {action: "challenge_mediated", reservation-identifier: reservation-identifier, originator: originator, beneficiary: beneficiary, 
+              originator-allocation: originator-allocation, beneficiary-allocation: beneficiary-allocation, originator-percentage: originator-percentage})
+      (ok true)
+    )
+  )
+)
+
+;; Add secondary verification for high-value reservations
+(define-public (add-secondary-verification (reservation-identifier uint) (verifier principal))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (allocation (get allocation reservation-record))
+      )
+      ;; Only for high-value reservations (> 1000 STX)
+      (asserts! (> allocation u1000) (err u120))
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get reservation-status reservation-record) "pending") ERR_STATUS_CONFLICT)
+      (print {action: "verification_added", reservation-identifier: reservation-identifier, verifier: verifier, requestor: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+;; Suspend problematic reservation
+(define-public (suspend-problematic-reservation (reservation-identifier uint) (justification (string-ascii 100)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get reservation-status reservation-record) "pending") 
+                   (is-eq (get reservation-status reservation-record) "accepted")) 
+                ERR_STATUS_CONFLICT)
+      (map-set ReservationIndex
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-record { reservation-status: "suspended" })
+      )
+      (print {action: "reservation_suspended", reservation-identifier: reservation-identifier, reporter: tx-sender, justification: justification})
+      (ok true)
+    )
+  )
+)
+
+;; Enable advanced authentication for high-value reservations
+(define-public (activate-enhanced-authentication (reservation-identifier uint) (auth-signature (buff 32)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (allocation (get allocation reservation-record))
+      )
+      ;; Only for reservations above threshold
+      (asserts! (> allocation u5000) (err u130))
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get reservation-status reservation-record) "pending") ERR_STATUS_CONFLICT)
+      (print {action: "enhanced_auth_activated", reservation-identifier: reservation-identifier, originator: originator, auth-hash: (hash160 auth-signature)})
+      (ok true)
+    )
+  )
+)
+
+;; Cryptographic validation for high-value reservations
+(define-public (validate-cryptographically (reservation-identifier uint) (message-digest (buff 32)) (cryptographic-signature (buff 65)) (signatory principal))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+        (validation-result (unwrap! (secp256k1-recover? message-digest cryptographic-signature) (err u150)))
+      )
+      ;; Verify with cryptographic proof
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq signatory originator) (is-eq signatory beneficiary)) (err u151))
+      (asserts! (is-eq (get reservation-status reservation-record) "pending") ERR_STATUS_CONFLICT)
+
+      ;; Verify signature matches expected signatory
+      (asserts! (is-eq (unwrap! (principal-of? validation-result) (err u152)) signatory) (err u153))
+
+      (print {action: "cryptographic_validation_complete", reservation-identifier: reservation-identifier, validator: tx-sender, signatory: signatory})
+      (ok true)
+    )
+  )
+)
+
+;; Add reservation supplementary data
+(define-public (attach-supplementary-data (reservation-identifier uint) (data-category (string-ascii 20)) (data-checksum (buff 32)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+      )
+      ;; Only authorized parties can add supplementary data
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (not (is-eq (get reservation-status reservation-record) "completed")) (err u160))
+      (asserts! (not (is-eq (get reservation-status reservation-record) "reverted")) (err u161))
+      (asserts! (not (is-eq (get reservation-status reservation-record) "expired")) (err u162))
+
+      ;; Valid data categories
+      (asserts! (or (is-eq data-category "data-specifications") 
+                   (is-eq data-category "transfer-confirmation")
+                   (is-eq data-category "integrity-verification")
+                   (is-eq data-category "originator-preferences")) (err u163))
+
+      (print {action: "supplementary_data_attached", reservation-identifier: reservation-identifier, data-category: data-category, 
+              data-checksum: data-checksum, submitter: tx-sender})
+      (ok true)
+    )
+  )
+)
+
