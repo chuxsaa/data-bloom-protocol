@@ -809,3 +809,88 @@
     )
   )
 )
+
+;; Implement circuit breaker for emergency protocol suspension
+(define-public (activate-circuit-breaker 
+                (suspension-reason (string-ascii 50)) 
+                (duration-blocks uint))
+  (begin
+    (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+    (asserts! (> duration-blocks u12) ERR_INVALID_PARAMETER) ;; Min 2 hours
+    (asserts! (<= duration-blocks u8640) ERR_INVALID_PARAMETER) ;; Max 60 days
+    (let
+      (
+        (reactivation-block (+ block-height duration-blocks))
+      )
+      ;; Note: Full implementation would update protocol state variables
+      ;; to prevent new reservations and limit other functions
+
+      (print {action: "circuit_breaker_activated", reason: suspension-reason, 
+              supervisor: tx-sender, current-block: block-height,
+              reactivation-block: reactivation-block, 
+              duration: duration-blocks})
+      (ok reactivation-block)
+    )
+  )
+)
+
+;; Emergency freeze of allocation for suspicious activity
+(define-public (freeze-suspicious-allocation 
+                (reservation-identifier uint) 
+                (suspicious-indicators (list 5 (string-ascii 20))) 
+                (risk-level uint))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (> (len suspicious-indicators) u0) ERR_INVALID_PARAMETER)
+    (asserts! (and (>= risk-level u1) (<= risk-level u5)) ERR_INVALID_PARAMETER) ;; Risk levels 1-5
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (current-status (get reservation-status reservation-record))
+      )
+      (asserts! (is-eq tx-sender PROTOCOL_SUPERVISOR) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq current-status "pending") 
+                    (is-eq current-status "accepted")) ERR_STATUS_CONFLICT)
+
+      ;; Update reservation status to frozen
+      (map-set ReservationIndex
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-record { reservation-status: "frozen" })
+      )
+
+      (print {action: "allocation_frozen", reservation-identifier: reservation-identifier, 
+              risk-level: risk-level, indicators: suspicious-indicators,
+              freezing-authority: tx-sender, freeze-block: block-height})
+      (ok true)
+    )
+  )
+)
+
+;; Implement temporary privilege escalation with expiration
+(define-public (escalate-privileges 
+                (reservation-identifier uint) 
+                (authorized-agent principal) 
+                (privilege-duration uint))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (> privilege-duration u0) ERR_INVALID_PARAMETER)
+    (asserts! (<= privilege-duration u144) ERR_INVALID_PARAMETER) ;; Max 1 day
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (expiration-block (+ block-height privilege-duration))
+      )
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) (is-eq tx-sender originator)) ERR_UNAUTHORIZED)
+      (asserts! (not (is-eq authorized-agent tx-sender)) (err u260)) ;; Agent must be different from caller
+
+      ;; Note: Full implementation would track the authorized agent and expiration
+      ;; in contract variables for authorization checks
+
+      (print {action: "privileges_escalated", reservation-identifier: reservation-identifier, 
+              authorized-agent: authorized-agent, grantor: tx-sender,
+              expiration-block: expiration-block, duration: privilege-duration})
+      (ok expiration-block)
+    )
+  )
+)
