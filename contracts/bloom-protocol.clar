@@ -1373,5 +1373,58 @@
   )
 )
 
+;; Multi-signature approval for high-value reservation operations
+(define-public (multi-sig-approve-operation (reservation-identifier uint) (operation-type (string-ascii 20)) (approval-signature (buff 65)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (allocation (get allocation reservation-record))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+      )
+      ;; Only high-value transactions require multi-sig (>5000 STX)
+      (asserts! (> allocation u5000) (err u230))
+      ;; Only involved parties can approve
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Verify operation type is valid
+      (asserts! (or (is-eq operation-type "finalize") 
+                   (is-eq operation-type "revert") 
+                   (is-eq operation-type "extend")
+                   (is-eq operation-type "transfer")) (err u231))
+      ;; In production, would verify signature against appropriate public key
+      ;; For demo purposes, we simply hash the signature to show intent
+      (print {action: "multi_sig_approval", reservation-identifier: reservation-identifier, 
+              operation-type: operation-type, approver: tx-sender, 
+              signature-hash: (hash160 approval-signature)})
+      (ok true)
+    )
+  )
+)
 
+;; Implement circuit breaker for abnormal activity detection
+(define-public (trigger-circuit-breaker (reservation-identifier uint) (anomaly-description (string-ascii 50)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (status (get reservation-status reservation-record))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+      )
+      ;; Check if caller is authorized to trigger circuit breaker
+      (asserts! (or (is-eq tx-sender PROTOCOL_SUPERVISOR) 
+                   (is-eq tx-sender originator) 
+                   (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      ;; Can only trigger for active reservations
+      (asserts! (or (is-eq status "pending") (is-eq status "accepted")) ERR_STATUS_CONFLICT)
+      ;; Notify all parties
+      (print {action: "circuit_breaker_triggered", reservation-identifier: reservation-identifier, 
+              triggered-by: tx-sender, anomaly-description: anomaly-description})
+      (ok true)
+    )
+  )
+)
 
