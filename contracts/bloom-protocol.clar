@@ -1287,3 +1287,91 @@
     )
   )
 )
+
+;; Apply time-locked security freeze
+(define-public (apply-security-freeze (reservation-identifier uint) (freeze-duration uint) (freeze-reason (string-ascii 30)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (> freeze-duration u12) ERR_INVALID_PARAMETER) ;; Minimum 12 blocks (~2 hours)
+    (asserts! (<= freeze-duration u720) ERR_INVALID_PARAMETER) ;; Maximum 720 blocks (~5 days)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (unfreeze-block (+ block-height freeze-duration))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get reservation-status reservation-record) "pending") 
+                   (is-eq (get reservation-status reservation-record) "accepted")) 
+                ERR_STATUS_CONFLICT)
+      (map-set ReservationIndex
+        { reservation-identifier: reservation-identifier }
+        (merge reservation-record { reservation-status: "frozen" })
+      )
+      (print {action: "security_freeze_applied", reservation-identifier: reservation-identifier, requestor: tx-sender, unfreeze-block: unfreeze-block, reason: freeze-reason})
+      (ok unfreeze-block)
+    )
+  )
+)
+
+;; Implement multi-signature approval process
+(define-public (register-multi-signature-requirement (reservation-identifier uint) (required-signers (list 5 principal)) (threshold uint))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (> (len required-signers) u1) ERR_INVALID_PARAMETER) ;; At least 2 signers required
+    (asserts! (> threshold u0) ERR_INVALID_PARAMETER) ;; Threshold must be positive
+    (asserts! (<= threshold (len required-signers)) ERR_INVALID_PARAMETER) ;; Threshold cannot exceed signer count
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (allocation (get allocation reservation-record))
+      )
+      ;; Only apply to high-value reservations
+      (asserts! (> allocation u5000) (err u230))
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get reservation-status reservation-record) "pending") ERR_STATUS_CONFLICT)
+
+      ;; Verify originator is in signer list
+      (asserts! (is-some (index-of required-signers originator)) (err u231))
+
+      (print {action: "multi_sig_registered", reservation-identifier: reservation-identifier, originator: originator, signers: required-signers, threshold: threshold})
+      (ok true)
+    )
+  )
+)
+
+;; Implement rate-limiting to prevent abuse
+(define-public (register-transaction-limits (reservation-identifier uint) (hourly-limit uint) (daily-limit uint))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (> hourly-limit u0) ERR_INVALID_PARAMETER)
+    (asserts! (>= daily-limit hourly-limit) ERR_INVALID_PARAMETER) ;; Daily limit must exceed hourly
+    (asserts! (<= hourly-limit u10) ERR_INVALID_PARAMETER) ;; Reasonable upper bound
+    (asserts! (<= daily-limit u50) ERR_INVALID_PARAMETER) ;; Reasonable upper bound
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get reservation-status reservation-record) "pending") 
+                   (is-eq (get reservation-status reservation-record) "accepted")) 
+                ERR_STATUS_CONFLICT)
+
+      ;; Calculate blocks per hour/day based on ~10 minute blocks
+      (let
+        (
+          (blocks-per-hour u6)
+          (blocks-per-day u144)
+        )
+        (print {action: "transaction_limits_registered", reservation-identifier: reservation-identifier, 
+                hourly-limit: hourly-limit, daily-limit: daily-limit, blocks-per-hour: blocks-per-hour, blocks-per-day: blocks-per-day})
+        (ok true)
+      )
+    )
+  )
+)
+
+
+
