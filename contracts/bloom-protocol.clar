@@ -339,3 +339,78 @@
     )
   )
 )
+
+;; Enable advanced authentication for high-value reservations
+(define-public (activate-enhanced-authentication (reservation-identifier uint) (auth-signature (buff 32)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (allocation (get allocation reservation-record))
+      )
+      ;; Only for reservations above threshold
+      (asserts! (> allocation u5000) (err u130))
+      (asserts! (is-eq tx-sender originator) ERR_UNAUTHORIZED)
+      (asserts! (is-eq (get reservation-status reservation-record) "pending") ERR_STATUS_CONFLICT)
+      (print {action: "enhanced_auth_activated", reservation-identifier: reservation-identifier, originator: originator, auth-hash: (hash160 auth-signature)})
+      (ok true)
+    )
+  )
+)
+
+;; Cryptographic validation for high-value reservations
+(define-public (validate-cryptographically (reservation-identifier uint) (message-digest (buff 32)) (cryptographic-signature (buff 65)) (signatory principal))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+        (validation-result (unwrap! (secp256k1-recover? message-digest cryptographic-signature) (err u150)))
+      )
+      ;; Verify with cryptographic proof
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq signatory originator) (is-eq signatory beneficiary)) (err u151))
+      (asserts! (is-eq (get reservation-status reservation-record) "pending") ERR_STATUS_CONFLICT)
+
+      ;; Verify signature matches expected signatory
+      (asserts! (is-eq (unwrap! (principal-of? validation-result) (err u152)) signatory) (err u153))
+
+      (print {action: "cryptographic_validation_complete", reservation-identifier: reservation-identifier, validator: tx-sender, signatory: signatory})
+      (ok true)
+    )
+  )
+)
+
+;; Add reservation supplementary data
+(define-public (attach-supplementary-data (reservation-identifier uint) (data-category (string-ascii 20)) (data-checksum (buff 32)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+      )
+      ;; Only authorized parties can add supplementary data
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      (asserts! (not (is-eq (get reservation-status reservation-record) "completed")) (err u160))
+      (asserts! (not (is-eq (get reservation-status reservation-record) "reverted")) (err u161))
+      (asserts! (not (is-eq (get reservation-status reservation-record) "expired")) (err u162))
+
+      ;; Valid data categories
+      (asserts! (or (is-eq data-category "data-specifications") 
+                   (is-eq data-category "transfer-confirmation")
+                   (is-eq data-category "integrity-verification")
+                   (is-eq data-category "originator-preferences")) (err u163))
+
+      (print {action: "supplementary_data_attached", reservation-identifier: reservation-identifier, data-category: data-category, 
+              data-checksum: data-checksum, submitter: tx-sender})
+      (ok true)
+    )
+  )
+)
+
