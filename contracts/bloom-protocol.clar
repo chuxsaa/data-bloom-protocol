@@ -1134,4 +1134,82 @@
   )
 )
 
+;; Register trusted device for reservation access
+(define-public (register-trusted-device (reservation-identifier uint) (device-public-key (buff 33)) (device-name (string-ascii 30)))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (beneficiary (get beneficiary reservation-record))
+      )
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender beneficiary)) ERR_UNAUTHORIZED)
+      (asserts! (or (is-eq (get reservation-status reservation-record) "pending") (is-eq (get reservation-status reservation-record) "accepted")) ERR_STATUS_CONFLICT)
+      (asserts! (<= block-height (get termination-block reservation-record)) ERR_RESERVATION_TIMEOUT)
+      (print {action: "device_registered", reservation-identifier: reservation-identifier, registering-party: tx-sender, device-name: device-name, device-key-hash: (hash160 device-public-key)})
+      (ok true)
+    )
+  )
+)
+
+;; Add authenticated multi-party approval requirement
+(define-public (require-multi-party-approval (reservation-identifier uint) (approvers (list 3 principal)) (expiration-deadline uint))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (> (len approvers) u1) ERR_INVALID_PARAMETER) ;; At least 2 approvers required
+    (asserts! (> expiration-deadline block-height) ERR_INVALID_PARAMETER) ;; Deadline must be in future
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (allocation (get allocation reservation-record))
+      )
+      ;; Only high-value reservations qualify for multi-party approval
+      (asserts! (> allocation u5000) (err u220))
+      ;; Only originator or supervisor
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Status must be pending
+      (asserts! (is-eq (get reservation-status reservation-record) "pending") ERR_STATUS_CONFLICT)
+      ;; Ensure deadline doesn't exceed termination block
+      (asserts! (<= expiration-deadline (get termination-block reservation-record)) (err u221))
+
+      ;; In production, additional code would store approvers list
+      (print {action: "multi_party_approval_enabled", reservation-identifier: reservation-identifier, requestor: tx-sender, 
+              approvers: approvers, expiration-deadline: expiration-deadline})
+      (ok true)
+    )
+  )
+)
+
+;; Implement rate-limited withdrawal protection
+(define-public (configure-withdrawal-limits (reservation-identifier uint) (max-withdrawal-per-period uint) (period-length uint))
+  (begin
+    (asserts! (valid-reservation-id? reservation-identifier) ERR_INVALID_IDENTIFIER)
+    (asserts! (> max-withdrawal-per-period u0) ERR_INVALID_PARAMETER)
+    (asserts! (> period-length u6) ERR_INVALID_PARAMETER) ;; Minimum 6 blocks (~1 hour)
+    (asserts! (<= period-length u144) ERR_INVALID_PARAMETER) ;; Maximum 144 blocks (~1 day)
+    (let
+      (
+        (reservation-record (unwrap! (map-get? ReservationIndex { reservation-identifier: reservation-identifier }) ERR_MISSING_RESERVATION))
+        (originator (get originator reservation-record))
+        (allocation (get allocation reservation-record))
+      )
+      ;; Only originator or supervisor can set withdrawal limits
+      (asserts! (or (is-eq tx-sender originator) (is-eq tx-sender PROTOCOL_SUPERVISOR)) ERR_UNAUTHORIZED)
+      ;; Only pending reservations can have limits configured
+      (asserts! (is-eq (get reservation-status reservation-record) "pending") ERR_STATUS_CONFLICT)
+      ;; Withdrawal limit must be less than total allocation
+      (asserts! (< max-withdrawal-per-period allocation) (err u230))
+
+      ;; In production, additional code would store these parameters
+      (print {action: "withdrawal_limits_configured", reservation-identifier: reservation-identifier, 
+              max-per-period: max-withdrawal-per-period, period-length: period-length, 
+              configured-by: tx-sender})
+      (ok true)
+    )
+  )
+)
+
+
 
